@@ -26,14 +26,14 @@ async def setup_app(app):
 
     https://docs.aiohttp.org/en/stable/web_advanced.html#cleanup-context
     """
-    # On startup
+    # On server startup
     # Using a static password for demo purposes
     app["pg_pool"] = await create_pool(
         database="agora", user="postgres", password="pg")
 
     yield
 
-    # On cleanup
+    # On server shutdown (cleanup)
     await app['pg_pool'].close()
 
 
@@ -63,19 +63,38 @@ async def get_user(request):
             raise web.HTTPUnprocessableEntity(text=f"User \"{user_name}\" not registered!")
 
 
-"""
 @routes.post("/register")
 async def post_user(request):
-    data = await request.post()  # Use this like a dictionary
+    data = await request.json()  # Use this like a dictionary
 
     async with request.app["pg_pool"].acquire() as connection:
-"""
+        # Validate if the user already exists
+        validate_stmt = await connection.prepare("SELECT user_id FROM users WHERE user_name = $1")
+
+        register_stmt = await connection.prepare("INSERT INTO users (user_name) VALUES ($1)")
+
+        # Try to get the user_name value from the post data
+        try:
+            user_name = data["user_name"]
+        except KeyError:
+            raise web.HTTPUnprocessableEntity(text="No value provided for 'user_name'!")
+
+        # If the user is already registered
+        if await validate_stmt.fetchval(user_name):
+            raise web.HTTPUnprocessableEntity(text=f"User '{user_name}' already registered!")
+
+        # Just an insertion, no result is returned
+        await register_stmt.fetchrow(user_name)
+
+        return web.Response(text=f"User '{user_name}' successfully registered!")
 
 
 if __name__ == "__main__":
     app = web.Application()
 
     app.add_routes(routes)
+
+    app.add_routes([web.static("/", "static")])
 
     app.cleanup_ctx.append(setup_app)
 
