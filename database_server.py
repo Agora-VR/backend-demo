@@ -29,7 +29,7 @@ async def setup_app(app):
     # On startup
     # Using a static password for demo purposes
     app["pg_pool"] = await create_pool(
-        database="postgres", user="postgres", password="pg")
+        database="agora", user="postgres", password="pg")
 
     yield
 
@@ -41,7 +41,7 @@ async def setup_app(app):
 async def get_users(request):
     """ Get list of users """
     async with request.app["pg_pool"].acquire() as connection:
-        results = await connection.fetch("SELECT * FROM public.\"user\"")
+        results = await connection.fetch("SELECT * FROM users")
 
         return web.json_response([dict(result.items()) for result in results])
 
@@ -52,7 +52,8 @@ async def get_user(request):
     user_name = request.match_info["user_name"]
 
     async with request.app["pg_pool"].acquire() as connection:
-        statement = await connection.prepare("SELECT * FROM public.\"user\" WHERE user_name = $1")
+        # Creating a prepared statement where "$1" is replaced by first argument
+        statement = await connection.prepare("SELECT * FROM users WHERE user_name = $1")
 
         result = await statement.fetchrow(user_name)
 
