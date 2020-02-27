@@ -18,6 +18,53 @@ from os import urandom
 from asyncpg import create_pool
 from aiohttp import web
 import aiohttp_cors
+from authlib.jose import errors, jwt
+from datetime import datetime, timedelta
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+
+def get_key_with_value(dictionary, target_value):
+    for key, value in dictionary.items():
+        if value == target_value:
+            return key
+
+
+def load_keys(password):
+    with open('private.pem', 'rb') as f:
+        private_key = load_pem_private_key(
+            f.read(), password=password.encode(), backend=default_backend())
+
+    with open('public.pem', 'rb') as f:
+        public_key = f.read()
+
+    return public_key, private_key
+
+
+def validate_request(request):
+    authorization_value = request.headers["Authorization"]
+
+    print(authorization_value)
+
+    auth_type, auth_token = authorization_value.split(" ")
+
+    if auth_type != "Bearer":
+        raise web.HTTPUnprocessableEntity(text="Invalid authentication type used!")
+
+    tokens = request.app["tokens"]
+
+    if auth_token not in tokens.values():
+        raise web.HTTPUnprocessableEntity(text="Invalidated authentication token used!")
+
+    claims = jwt.decode(auth_token, request.app["public_key"])
+
+    try:
+        claims.validate()
+        return claims
+    except errors.ExpiredTokenError:
+        del request.app["tokens"][get_key_with_value(tokens, auth_token)]
+
+        raise web.HTTPUnprocessableEntity(text="Provided token is expired!")
 
 
 routes = web.RouteTableDef()
@@ -58,6 +105,8 @@ async def get_users(request):
 @routes.get("/user/{user_name}")
 async def get_user(request):
     """ Get info on singular user """
+    print(validate_request(request))
+
     user_name = request.match_info["user_name"]
 
     async with request.app["pg_pool"].acquire() as connection:
@@ -106,11 +155,66 @@ async def post_user(request):
         return web.Response(text=f"User '{user_name}' successfully registered!")
 
 
+@routes.post("/authenticate")
+async def authenticate_user(request):
+    data = await request.json()
+
+    try:
+        user_name, user_pass = data["user_name"], data["user_pass"]
+    except KeyError:
+        raise web.HTTPUnprocessableEntity(text="Not all keys provided!")
+
+    async with request.app["pg_pool"].acquire() as connection:
+        user_stmt = await connection.prepare("SELECT * FROM users NATURAL JOIN user_types WHERE user_name = $1")
+
+        user_result = await user_stmt.fetchrow(user_name)
+
+        if user_result is None:
+            raise web.HTTPUnprocessableEntity(text="Invalid credential provided!")
+
+        user_data = dict(user_result.items())
+
+    user_hash, user_salt = user_data["user_hash"], user_data["user_salt"]
+
+    password_hash = pbkdf2_hmac("sha256", user_pass.encode(), user_salt, 100000)
+
+    # If the hashes don't match
+    if password_hash != user_hash:
+        raise web.HTTPUnprocessableEntity(text="Invalid credential provided!")
+
+    private_key = request.app["private_key"]
+
+    current_datetime = datetime.utcnow()
+    expiration_delta = timedelta(seconds=5)
+
+    user_id = user_data["user_id"]
+
+    payload = {
+        'iss': "Agora VR",
+        'exp': current_datetime + expiration_delta,
+        'agora': {
+            'user_id': user_id,
+            'user_name': user_data["user_name"],
+            'user_type': user_data["user_type_name"],
+        },
+    }
+
+    token = jwt.encode({'alg': "RS256"}, payload, private_key)
+
+    request.app["tokens"][user_id] = token.decode()
+
+    return web.Response(body=token)
+
+
 if __name__ == "__main__":
     app = web.Application()
 
+    app["public_key"], app["private_key"] = load_keys("ButgersBuses")
+
+    app["tokens"] = {}
+
     cors = aiohttp_cors.setup(app, defaults={
-        "*": aiohttp_cors.ResourceOptions(
+        "http://localhost:5000": aiohttp_cors.ResourceOptions(
             allow_credentials=False,
             expose_headers="*",
             allow_headers="*",
@@ -120,16 +224,7 @@ if __name__ == "__main__":
     app.add_routes(routes)
 
     for route in app.router.routes():
-        print(route)
-        cors.add(route, {
-            "http://localhost:5000": aiohttp_cors.ResourceOptions(
-                allow_credentials=False,
-                expose_headers="*",
-                allow_headers="*",
-            )
-        })
-
-    app.add_routes([web.static("/", "static")])
+        cors.add(route)
 
     app.cleanup_ctx.append(setup_app)
 
