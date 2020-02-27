@@ -9,6 +9,16 @@ I also recommend using the
 [Powershell Preview](https://github.com/PowerShell/PowerShell/releases/tag/v7.0.0-rc.2)
 for use in Visual Studio Code.
 
+## Generating RSA Keys
+
+In order to work with JWT authentication, we must generate an RSA key pair.
+This can be accomplished using OpenSSL:
+
+```
+openssl genpkey -algorithm RSA -out private.pem -aes-256-cbc -pass pass:password123
+openssl rsa -in private.pem -pubout -out public.pem
+```
+
 ## Create a Virtual Environment
 
 To run these scripts, it is best to create a virtual environment and install
