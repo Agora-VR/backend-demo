@@ -6,7 +6,7 @@ This script uses two dependencies:
 
 These can be installed by running:
 
-    pip install aiohttp asyncpg
+    pip install aiohttp aiohttp_cors asyncpg Authlib
 
 The database I have running is called "postgres", is using a user with
 name "postgres" and password "pg". I also created a table under the
@@ -42,14 +42,15 @@ def load_keys(password):
 
 
 def validate_request(request):
-    authorization_value = request.headers["Authorization"]
-
-    print(authorization_value)
+    try:
+        authorization_value = request.headers["Authorization"]
+    except KeyError:
+        raise web.HTTPUnprocessableEntity(text="No authorization header provided!")
 
     auth_type, auth_token = authorization_value.split(" ")
 
     if auth_type != "Bearer":
-        raise web.HTTPUnprocessableEntity(text="Invalid authentication type used!")
+        raise web.HTTPUnprocessableEntity(text="Invalid authentication method!")
 
     tokens = request.app["tokens"]
 
@@ -68,12 +69,6 @@ def validate_request(request):
 
 
 routes = web.RouteTableDef()
-
-user_types = {
-    "patient": 1,
-    "clinician": 2,
-    "caretaker": 3,
-}
 
 
 async def setup_app(app):
@@ -102,23 +97,23 @@ async def get_users(request):
         return web.json_response([dict(result.items()) for result in results])
 
 
-@routes.get("/user/{user_name}")
-async def get_user(request):
-    """ Get info on singular user """
-    print(validate_request(request))
+# @routes.get("/user/{user_name}")
+# async def get_user(request):
+#     """ Get info on singular user """
+#     print(validate_request(request))
 
-    user_name = request.match_info["user_name"]
+#     user_name = request.match_info["user_name"]
 
-    async with request.app["pg_pool"].acquire() as connection:
-        # Creating a prepared statement where "$1" is replaced by first argument
-        statement = await connection.prepare("SELECT user_name, user_type_id FROM users WHERE user_name = $1")
+#     async with request.app["pg_pool"].acquire() as connection:
+#         # Creating a prepared statement where "$1" is replaced by first argument
+#         statement = await connection.prepare("SELECT user_name, user_type_id FROM users WHERE user_name = $1")
 
-        result = await statement.fetchrow(user_name)
+#         result = await statement.fetchrow(user_name)
 
-        if result:
-            return web.json_response(dict(result.items()))
-        else:
-            raise web.HTTPUnprocessableEntity(text=f"User \"{user_name}\" not registered!")
+#         if result:
+#             return web.json_response(dict(result.items()))
+#         else:
+#             raise web.HTTPUnprocessableEntity(text=f"User \"{user_name}\" not registered!")
 
 
 @routes.post("/register")
@@ -132,7 +127,7 @@ async def post_user(request):
         raise web.HTTPUnprocessableEntity(text="Not all require parameters passed!")
 
     try:
-        user_type_id = user_types[user_type]
+        user_type_id = request.app["types"][user_type]
     except KeyError:
         raise web.HTTPUnprocessableEntity(text=f"Invalid user type '{user_type}' provided!")
 
@@ -206,12 +201,39 @@ async def authenticate_user(request):
     return web.Response(body=token)
 
 
+@routes.get("/user/clinicians")
+async def get_clinicians(request):
+    session = validate_request(request)["agora"]
+
+    user_id, user_type = session["user_id"], session["user_type"]
+
+    if user_type not in request.app["types"] or user_type != "patient":
+        raise web.HTTPUnprocessableEntity(text="Client is not a valid user type for endpoint!")
+
+    async with request.app["pg_pool"].acquire() as connection:
+        clinician_stmt = await connection.prepare("""
+            SELECT user_id, user_name
+            FROM serves JOIN users ON users.user_id = serves.clinician_id
+            WHERE patient_id = $1""")
+
+        results = await clinician_stmt.fetch(user_id)
+
+        return web.json_response([dict(result.items()) for result in results])
+        
+
+
 if __name__ == "__main__":
     app = web.Application()
 
     app["public_key"], app["private_key"] = load_keys("ButgersBuses")
 
     app["tokens"] = {}
+
+    app["types"] = {
+        "patient": 1,
+        "clinician": 2,
+        "caretaker": 3,
+    }
 
     cors = aiohttp_cors.setup(app, defaults={
         "http://localhost:5000": aiohttp_cors.ResourceOptions(
