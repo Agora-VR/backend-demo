@@ -12,6 +12,7 @@ The database I have running is called "postgres", is using a user with
 name "postgres" and password "pg". I also created a table under the
 "public" schema called "user" which has a "user_id" and "user_name" column
 """
+from datetime import datetime
 from hashlib import pbkdf2_hmac
 from os import urandom
 
@@ -123,6 +124,7 @@ async def post_user(request):
     # Try to get the user_name value from the post data
     try:
         user_name, user_pass, user_type = data["user_name"], data["user_pass"], data["user_type"]
+        user_full_name = data["user_full_name"]
     except KeyError:
         raise web.HTTPUnprocessableEntity(text="Not all require parameters passed!")
 
@@ -143,9 +145,10 @@ async def post_user(request):
         if await validate_stmt.fetchval(user_name):
             raise web.HTTPUnprocessableEntity(text=f"User '{user_name}' already registered!")
 
-        await connection.execute(
-            "INSERT INTO users (user_type_id, user_name, user_hash, user_salt) VALUES ($1, $2, $3, $4);",
-            user_type_id, user_name, password_hash, password_salt)
+        await connection.execute("""
+            INSERT INTO users (user_type_id, user_name, user_full_name, user_hash, user_salt)
+            VALUES ($1, $2, $3, $4, $5)""",
+            user_type_id, user_name, user_full_name, password_hash, password_salt)
 
         return web.Response(text=f"User '{user_name}' successfully registered!")
 
@@ -180,7 +183,7 @@ async def authenticate_user(request):
     private_key = request.app["private_key"]
 
     current_datetime = datetime.utcnow()
-    expiration_delta = timedelta(seconds=5)
+    expiration_delta = timedelta(minutes=20)
 
     user_id = user_data["user_id"]
 
@@ -212,27 +215,84 @@ async def get_clinicians(request):
 
     async with request.app["pg_pool"].acquire() as connection:
         clinician_stmt = await connection.prepare("""
-            SELECT user_id, user_name
+            SELECT user_id, user_name, user_full_name
             FROM serves JOIN users ON users.user_id = serves.clinician_id
-            WHERE patient_id = $1""")
+            WHERE serves.patient_id = $1""")
 
         results = await clinician_stmt.fetch(user_id)
 
         return web.json_response([dict(result.items()) for result in results])
-        
+
+
+@routes.get("/user/patients")
+async def get_patients(request):
+    session = validate_request(request)["agora"]
+
+    user_id, user_type = session["user_id"], session["user_type"]
+
+    if user_type not in request.app["types"] or user_type != "clinician":
+        raise web.HTTPUnprocessableEntity(text="Client is not a valid user type for this endpoint!")
+
+    async with request.app["pg_pool"].acquire() as connection:
+        clinician_stmt = await connection.prepare("""
+            SELECT user_id, user_name, user_full_name
+            FROM serves JOIN users ON users.user_id = serves.patient_id
+            WHERE serves.clinician_id = $1""")
+
+        results = await clinician_stmt.fetch(user_id)
+
+        return web.json_response([dict(result.items()) for result in results])
+
+
+@routes.get("/user/register_form")
+async def get_register_form(request):
+    session = validate_request(request)["agora"]
+
+    user_type = session["user_type"]
+
+    async with request.app["pg_pool"].acquire() as connection:
+        statement = await connection.prepare("""
+            SELECT forms.*
+            FROM user_types JOIN forms ON user_type_form_name = form_name
+            WHERE user_type_name = $1""")
+
+        result = await statement.fetchrow(user_type)
+
+        if result:
+            return web.json_response(dict(result.items()))
+
+
+@routes.post("/user/register_form")
+async def post_register_form(request):
+    session = validate_request(request)["agora"]
+
+    data = await request.json()
+
+    try:
+        form_name, form_data = data["name"], data["results"]
+    except KeyError:
+        raise web.HTTPUnprocessableEntity(text="Not all keys provided!")
+
+    async with request.app["pg_pool"].acquire() as connection:
+        await connection.execute("""
+            INSERT INTO responses (response_owner_id, response_form_name, response_datetime, response_data)
+            VALUES ($1, $2, $3, $4)""",
+            session["user_id"], form_name, datetime.utcnow(), form_data)
+
+        return web.Response(text="Form response registered successfully!")
 
 
 if __name__ == "__main__":
     app = web.Application()
 
-    app["public_key"], app["private_key"] = load_keys("ButgersBuses")
+    app["public_key"], app["private_key"] = load_keys("EmotionComedian")
 
     app["tokens"] = {}
 
     app["types"] = {
         "patient": 1,
         "clinician": 2,
-        "caretaker": 3,
+        "caregiver": 3,
     }
 
     cors = aiohttp_cors.setup(app, defaults={
