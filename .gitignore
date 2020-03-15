@@ -2,6 +2,10 @@
 private.pem
 public.pem
 
+# Testing files
+wheres_my_juul.ogg
+storage/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
